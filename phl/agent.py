@@ -12,6 +12,8 @@ from phl.jellyfin import search_videos, get_all_items, JellyfinItemType
 # from langchain_core.globals import set_debug
 # set_debug(True)
 
+MAX_ITERATIONS = 10  # safety valve against infinite loop
+
 
 @tool
 async def search_jellyfin(query: str) -> list[dict[str, str]]:
@@ -84,14 +86,24 @@ async def process_message(model, telegram_message: Message):
     await telegram_message.reply_text(ai_msg.text, parse_mode="HTML")
     messages.append(ai_msg)
 
-    for tool_call in ai_msg.tool_calls:
-        if tool_call["name"] in tool_names_to_functions:
+    for _ in range(MAX_ITERATIONS):
+        ai_msg = await model.ainvoke(messages)
+        messages.append(ai_msg)
+
+        if not ai_msg.tool_calls:
+            # No more tools requested — this is the final answer
+            await telegram_message.reply_text(ai_msg.text, parse_mode="HTML")
+            return
+
+        for tool_call in ai_msg.tool_calls:
+            if tool_call["name"] not in tool_names_to_functions:
+                raise ValueError("Unknown tool_call name: %s" % tool_call["name"])
             tool_result = await tool_names_to_functions[tool_call["name"]].ainvoke(
                 tool_call
             )
-        else:
-            raise ValueError("Unknown tool_call name: %s", tool_call["name"])
-        messages.append(tool_result)
+            messages.append(tool_result)
 
-    final_response = await model.ainvoke(messages)
-    await telegram_message.reply_text(final_response.text, parse_mode="HTML")
+    # Hit max_iterations without a final answer
+    await telegram_message.reply_text(
+        "Sorry, I got stuck thinking about that for too long.", parse_mode="HTML"
+    )
