@@ -3,16 +3,13 @@ import os
 import sys
 import traceback
 
-from langchain_core.runnables import Runnable
-from langchain_core.language_models.base import LanguageModelInput
-from langchain_core.messages.ai import AIMessage
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-from phl.agent import process_message
+from phl.agent import Agent
 
 
-def get_handler(model, telegram_user_id: int):
+def get_handler(agent: Agent, telegram_user_id: int):
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context._user_id != telegram_user_id:
             logging.warning("Ignoring message from different user id...")
@@ -29,9 +26,9 @@ def get_handler(model, telegram_user_id: int):
         send_chat_promise = context.bot.send_chat_action(
             update.message.chat_id, action="typing"
         )
-        process_msg_promise = process_message(model, update.message)
+        process_msg_promise = agent.process_message(update.message)
         await send_chat_promise
-        await process_msg_promise
+        await update.message.reply_text(await process_msg_promise, parse_mode="HTML")
 
     return handle_message
 
@@ -50,7 +47,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-def get_app(model: Runnable[LanguageModelInput, AIMessage]):
+def get_app(agent: Agent):
     telegram_api_key = os.getenv("TELEGRAM_API_KEY")
     if telegram_api_key is None:
         logging.error("Must set TELEGRAM_API_KEY")
@@ -68,7 +65,7 @@ def get_app(model: Runnable[LanguageModelInput, AIMessage]):
     app = ApplicationBuilder().token(telegram_api_key).build()
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND, get_handler(model, telegram_user_id)
+            filters.TEXT & ~filters.COMMAND, get_handler(agent, telegram_user_id)
         )
     )
     app.add_error_handler(error_handler)

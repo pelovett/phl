@@ -1,0 +1,14 @@
+CREATE TABLE schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    minute INTEGER NOT NULL,
+    hour INTEGER NOT NULL DEFAULT -1,
+    day_of_week INTEGER NOT NULL DEFAULT -1,
+    day INTEGER NOT NULL DEFAULT -1,
+    month INTEGER NOT NULL DEFAULT -1,
+    every_hour INTEGER NOT NULL DEFAULT 0,
+    every_day_of_week INTEGER NOT NULL DEFAULT 0,
+    every_day INTEGER NOT NULL DEFAULT 0,
+    every_month INTEGER NOT NULL DEFAULT 0,
+    prompt TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
