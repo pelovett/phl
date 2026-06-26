@@ -1,4 +1,6 @@
+import logging
 from asyncio import sleep
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -76,11 +78,12 @@ async def get_schedules(db: Database) -> list["Schedule"]:
     ]
 
 
-async def loop(db: Database):
+async def loop(db: Database, on_match: Callable[[str], Awaitable[str]]):
     while True:
         now = datetime.now().replace(second=0, microsecond=0)
-        print(f"Checking at time: {now}")
         for sched in await get_schedules(db):
             if sched.check(now):
-                print(f"Cur time matches schedule: {sched}")
+                logging.info("Schedule matched: %s", sched)
+                result = await on_match(sched.prompt)
+                logging.info("Schedule result: %s", result)
         await sleep(60 - datetime.now().second)

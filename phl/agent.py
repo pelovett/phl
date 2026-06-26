@@ -9,7 +9,7 @@ from langchain_core.language_models.base import LanguageModelInput
 from langchain_core.messages.ai import AIMessage
 from langchain_core.tools import InjectedToolArg
 from langchain_openrouter import ChatOpenRouter
-from telegram import Message
+from telegram import Bot, Message
 
 from phl.cron import (
     Schedule,
@@ -61,6 +61,17 @@ async def get_jellyfin_movies(**_) -> dict:
 
 
 @tool
+async def send_message(
+    bot: Annotated[Bot, InjectedToolArg],
+    telegram_user_id: Annotated[int, InjectedToolArg],
+    text: str,
+) -> str:
+    """Send a Telegram message to the user"""
+    await bot.send_message(chat_id=telegram_user_id, text=text)
+    return "Message sent."
+
+
+@tool
 async def get_schedules(db: Annotated[Database, InjectedToolArg], **_) -> list[dict]:
     """Get all currently configured schedules"""
     schedules = await _get_schedules_from_db(db)
@@ -82,7 +93,9 @@ async def create_schedule(
     month: int = -1,
 ) -> str:
     """Create a new schedule. Use every_* fields to indicate wildcards (like * in cron).
-    Set the corresponding int field when every_* is False."""
+    Set the corresponding int field when every_* is False.
+    The prompt is an instruction that will be sent to you (the AI) at the scheduled time —
+    write it as a self-contained task description, e.g. 'Check the weather and send me a summary.'"""
     schedule = Schedule(
         prompt=prompt,
         minute=minute,
@@ -103,20 +116,51 @@ _tools = {
     "search_jellyfin": search_jellyfin,
     "get_jellyfin_shows": get_jellyfin_shows,
     "get_jellyfin_movies": get_jellyfin_movies,
+    "send_message": send_message,
     "get_schedules": get_schedules,
     "create_schedule": create_schedule,
 }
 
 
-def _needs_db(tool_fn) -> bool:
+def _injected_args(tool_fn, agent: "Agent") -> dict:
     fn = getattr(tool_fn, "coroutine", None) or getattr(tool_fn, "func", None)
-    return fn is not None and "db" in inspect.signature(fn).parameters
+    if fn is None:
+        return {}
+    available = {
+        "db": agent.db,
+        "bot": agent.bot,
+        "telegram_user_id": agent.telegram_user_id,
+    }
+    params = inspect.signature(fn).parameters
+    return {k: v for k, v in available.items() if k in params}
 
 
 @dataclass
 class Agent:
     model: Runnable[LanguageModelInput, AIMessage]
     db: Database
+    bot: Bot
+    telegram_user_id: int
+
+    async def run_prompt(self, prompt: str) -> str:
+        messages = [{"role": "user", "content": prompt}]
+        for _ in range(MAX_ITERATIONS):
+            ai_msg = await self.model.ainvoke(messages)
+            messages.append(ai_msg)
+
+            if not ai_msg.tool_calls:
+                return ai_msg.text
+
+            for tool_call in ai_msg.tool_calls:
+                if tool_call["name"] not in _tools:
+                    raise ValueError("Unknown tool_call name: %s" % tool_call["name"])
+                tool_fn = _tools[tool_call["name"]]
+                injected = _injected_args(tool_fn, self)
+                if injected:
+                    tool_call = {**tool_call, "args": {**tool_call["args"], **injected}}
+                messages.append(await tool_fn.ainvoke(tool_call))
+
+        return "Job failed, got stuck thinking for too long."
 
     async def process_message(self, telegram_message: Message) -> str:
         messages = [
@@ -126,7 +170,10 @@ class Agent:
                     "You are a helpful assistant. Format your responses using Telegram HTML markup. "
                     "Supported tags: <b>bold</b>, <i>italic</i>, <code>inline code</code>, "
                     "<pre>code blocks</pre>, <u>underline</u>, <s>strikethrough</s>. "
-                    "Do not use Markdown. Do not use any HTML tags outside this set."
+                    "Do not use Markdown. Do not use any HTML tags outside this set. "
+                    "You can create schedules that will invoke you automatically at a given time — "
+                    "the schedule's prompt is an instruction sent to you, so write it as a clear task, "
+                    "e.g. 'Send the user a summary of new Jellyfin releases this week.'"
                 ),
             },
             {
@@ -135,7 +182,8 @@ class Agent:
             },
         ]
         ai_msg = await self.model.ainvoke(messages)
-        await telegram_message.reply_text(ai_msg.text, parse_mode="HTML")
+        if ai_msg.text:
+            await telegram_message.reply_text(ai_msg.text, parse_mode="HTML")
         messages.append(ai_msg)
 
         for _ in range(MAX_ITERATIONS):
@@ -149,18 +197,16 @@ class Agent:
                 if tool_call["name"] not in _tools:
                     raise ValueError("Unknown tool_call name: %s" % tool_call["name"])
                 tool_fn = _tools[tool_call["name"]]
-                if _needs_db(tool_fn):
-                    tool_call = {
-                        **tool_call,
-                        "args": {**tool_call["args"], "db": self.db},
-                    }
+                injected = _injected_args(tool_fn, self)
+                if injected:
+                    tool_call = {**tool_call, "args": {**tool_call["args"], **injected}}
                 tool_result = await tool_fn.ainvoke(tool_call)
                 messages.append(tool_result)
 
         return "Sorry, I got stuck thinking about that for too long."
 
 
-def get_model(db: Database) -> Agent:
+def get_model(db: Database, bot: Bot, telegram_user_id: int) -> Agent:
     model = ChatOpenRouter(
         model="deepseek/deepseek-v4-flash",
         temperature=0,
@@ -168,4 +214,4 @@ def get_model(db: Database) -> Agent:
         max_retries=2,
     ).bind_tools(list(_tools.values()))
 
-    return Agent(model=model, db=db)
+    return Agent(model=model, db=db, bot=bot, telegram_user_id=telegram_user_id)

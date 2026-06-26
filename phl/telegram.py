@@ -1,10 +1,11 @@
+import html
 import logging
 import os
 import sys
 import traceback
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, ApplicationBuilder, MessageHandler, filters, ContextTypes
 
 from phl.agent import Agent
 
@@ -43,11 +44,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     )
     if isinstance(update, Update) and update.message:
         await update.message.reply_text(
-            f"❌ Error:\n\n<pre>{tb}</pre>", parse_mode="HTML"
+            f"❌ Error:\n\n<pre>{html.escape(tb)}</pre>", parse_mode="HTML"
         )
 
 
-def get_app(agent: Agent):
+def build_app() -> tuple[Application, int]:
     telegram_api_key = os.getenv("TELEGRAM_API_KEY")
     if telegram_api_key is None:
         logging.error("Must set TELEGRAM_API_KEY")
@@ -63,10 +64,13 @@ def get_app(agent: Agent):
         raise ValueError("TELEGRAM_USER_ID must be int, not: " + telegram_user_id)
 
     app = ApplicationBuilder().token(telegram_api_key).build()
+    return app, telegram_user_id
+
+
+def register_handlers(app: Application, agent: Agent, telegram_user_id: int):
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND, get_handler(agent, telegram_user_id)
         )
     )
     app.add_error_handler(error_handler)
-    return app
